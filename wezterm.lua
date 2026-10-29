@@ -222,6 +222,24 @@ local resurrect = {
 }
 resurrect.state_manager.change_state_save_dir(STATE_DIR)
 
+-- The vendored resurrect's file_io does not create parent directories; on a
+-- fresh machine the subfolders are missing and every save fails with
+-- "Could not open file". Create them once at startup, cross-platform.
+local function ensure_state_dirs()
+	local sep = is_windows and "\\" or "/"
+	for _, sub in ipairs({ "workspace", "window", "tab" }) do
+		local dir = STATE_DIR .. sub
+		if is_windows then
+			-- mkdir on cmd.exe creates intermediate dirs and is a no-op if it
+			-- already exists (the error is swallowed by run_child_process).
+			pcall(wezterm.run_child_process, { "cmd.exe", "/c", "mkdir", dir })
+		else
+			pcall(wezterm.run_child_process, { "mkdir", "-p", dir })
+		end
+	end
+end
+ensure_state_dirs()
+
 -- Where the claude/opencode session records live. On Windows these are inside
 -- WSL, reached via the \\wsl.localhost share, but only read on restore (not in
 -- the periodic save loop), so the network access is occasional, not hot.
