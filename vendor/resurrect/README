@@ -1,0 +1,1 @@
+Vendored from https://github.com/MLFlexer/resurrect.wezterm at 685d812^ (last commit before the dev.wezterm dependency, which reloads the config in a loop). Upstream is archived.
