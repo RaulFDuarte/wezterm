@@ -2,6 +2,12 @@ local wezterm = require("wezterm")
 
 local config = wezterm.config_builder()
 
+-- Two environments this config runs in:
+--   * windows: WezTerm.exe on Windows, opening the Ubuntu WSL distro as its
+--     shell. Windows 11 rounds the window corners for free.
+--   * gnome: the home Ubuntu desktop, where mutter draws a rounded titlebar.
+local is_windows = wezterm.target_triple:find("windows") ~= nil
+
 -- rose-pine-moon as the base, with a lavender-tinted foreground and a warm
 -- cursor so text picks up the gradient's indigo/pine mood.
 local scheme = wezterm.color.get_builtin_schemes()["rose-pine-moon"]
@@ -34,10 +40,21 @@ config.window_background_gradient = {
 	noise = 48,
 }
 config.hide_tab_bar_if_only_one_tab = true
--- WezTerm's own Wayland frame is square on GNOME. Running through XWayland
--- lets mutter draw the titlebar, which gives the window rounded corners.
-config.enable_wayland = false
-config.window_decorations = "TITLE|RESIZE"
+if is_windows then
+	-- Run as a Windows app but open the Ubuntu WSL distro as the shell, so the
+	-- environment is the real Ubuntu while Windows 11 rounds the corners.
+	--
+	-- Launch wsl.exe directly instead of using the "WSL:" multiplexer domain:
+	-- that domain runs a mux-server inside WSL over a socket that Windows keeps
+	-- tearing down (os error 10054), which crashes the pane in a reconnect loop.
+	-- A plain wsl.exe process is a stable, non-mux connection.
+	config.default_prog = { "wsl.exe", "--distribution", "Ubuntu-24.04", "--cd", "~" }
+	config.window_decorations = "TITLE|RESIZE"
+else
+	-- GNOME at home: XWayland + a titled frame lets mutter draw rounded corners.
+	config.enable_wayland = false
+	config.window_decorations = "TITLE|RESIZE"
+end
 config.use_fancy_tab_bar = true
 config.window_padding = { left = 14, right = 14, top = 10, bottom = 10 }
 config.window_frame = {
@@ -181,9 +198,23 @@ config.key_tables = {
 -- next launch comes back as it was. The plugin only saves while the GUI is
 -- alive, so the last state on disk is at most SAVE_INTERVAL_SECONDS old.
 local SAVE_INTERVAL_SECONDS = 30
--- Vendored (see vendor/resurrect/README): the upstream plugin loader pulls in
--- another plugin that reloads the config in a loop.
-local STATE_DIR = os.getenv("WEZTERM_RESURRECT_DIR") or (wezterm.home_dir .. "/.local/state/wezterm-resurrect/")
+
+-- The earlier config-reload loop on Windows was NOT resurrect itself: it was
+-- loading the vendored plugin and its state over \\wsl.localhost (a network
+-- path), which stalled and retriggered reloads. With the whole config dir
+-- (including vendor/) on a local Windows disk and the state dir kept local
+-- too, resurrect runs fine here. Keep every path local on Windows.
+local STATE_DIR
+if is_windows then
+	-- %LOCALAPPDATA%\wezterm-resurrect on the local disk (never the WSL share).
+	local localappdata = os.getenv("LOCALAPPDATA") or (wezterm.home_dir .. "\\AppData\\Local")
+	STATE_DIR = localappdata .. "\\wezterm-resurrect\\"
+else
+	STATE_DIR = os.getenv("WEZTERM_RESURRECT_DIR") or (wezterm.home_dir .. "/.local/state/wezterm-resurrect/")
+end
+
+-- wezterm.config_dir is the local config folder on each OS, so the vendored
+-- plugin is always loaded from local disk.
 package.path = package.path .. ";" .. wezterm.config_dir .. "/vendor/?.lua"
 local resurrect = {
 	state_manager = require("resurrect.state_manager"),
@@ -191,8 +222,17 @@ local resurrect = {
 }
 resurrect.state_manager.change_state_save_dir(STATE_DIR)
 
--- Programs that are relaunched on restore (claude, opencode). Claude Code records its session id
--- per pid in ~/.claude/sessions, so each pane resumes its own conversation.
+-- Where the claude/opencode session records live. On Windows these are inside
+-- WSL, reached via the \\wsl.localhost share, but only read on restore (not in
+-- the periodic save loop), so the network access is occasional, not hot.
+local SESSION_HOME = wezterm.home_dir
+if is_windows then
+	SESSION_HOME = "\\\\wsl.localhost\\Ubuntu-24.04\\home\\raul"
+end
+
+-- Programs that are relaunched on restore (claude, opencode). Claude Code
+-- records its session id per pid in ~/.claude/sessions, so each pane resumes
+-- its own conversation.
 local pane_tree = require("resurrect.pane_tree")
 pane_tree.resume_command = function(info)
 	if not info then
@@ -206,7 +246,7 @@ pane_tree.resume_command = function(info)
 	if info.name ~= "claude" then
 		return nil
 	end
-	local file = io.open(wezterm.home_dir .. "/.claude/sessions/" .. info.pid .. ".json", "r")
+	local file = io.open(SESSION_HOME .. "/.claude/sessions/" .. info.pid .. ".json", "r")
 	if not file then
 		return nil
 	end
@@ -253,7 +293,13 @@ local function center_window(gui_window, scale)
 			local dims = gui_window:get_dimensions()
 			width, height = dims.pixel_width, dims.pixel_height
 		end
-		gui_window:set_position(screen.x + (screen.width - width) // 2, screen.y + (screen.height - height) // 2)
+		-- Never let the window exceed the active screen (multi-monitor on
+		-- Windows can report dimensions that overflow one display).
+		width = math.min(width, screen.width)
+		height = math.min(height, screen.height)
+		local x = screen.x + (screen.width - width) // 2
+		local y = screen.y + (screen.height - height) // 2
+		gui_window:set_position(x, y)
 	end)
 end
 
