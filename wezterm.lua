@@ -213,89 +213,70 @@ else
 	STATE_DIR = os.getenv("WEZTERM_RESURRECT_DIR") or (wezterm.home_dir .. "/.local/state/wezterm-resurrect/")
 end
 
--- wezterm.config_dir is the local config folder on each OS, so the vendored
--- plugin is always loaded from local disk.
-package.path = package.path .. ";" .. wezterm.config_dir .. "/vendor/?.lua"
-local resurrect = {
-	state_manager = require("resurrect.state_manager"),
-	workspace_state = require("resurrect.workspace_state"),
-}
-resurrect.state_manager.change_state_save_dir(STATE_DIR)
+-- Resurrect is Linux-only here. On Windows it caused a hard failure mode:
+-- loading the plugin and running its pane-restore / gui-startup against the
+-- wsl.exe shell put WezTerm into a reopen loop with intermittent freezes.
+-- Layout persistence is not worth that, so skip resurrect entirely on Windows
+-- and run as a plain terminal. Everything below only wires up on Linux.
+local resurrect = nil
+if not is_windows then
+	-- wezterm.config_dir is the local config folder, so the vendored plugin is
+	-- always loaded from local disk.
+	package.path = package.path .. ";" .. wezterm.config_dir .. "/vendor/?.lua"
+	resurrect = {
+		state_manager = require("resurrect.state_manager"),
+		workspace_state = require("resurrect.workspace_state"),
+	}
+	resurrect.state_manager.change_state_save_dir(STATE_DIR)
 
--- The vendored resurrect's file_io does not create parent directories; on a
--- fresh machine the subfolders are missing and every save fails with
--- "Could not open file". Create them once at startup, cross-platform.
-local function ensure_state_dirs()
-	local sep = is_windows and "\\" or "/"
-	for _, sub in ipairs({ "workspace", "window", "tab" }) do
-		local dir = STATE_DIR .. sub
-		if is_windows then
-			-- mkdir on cmd.exe creates intermediate dirs and is a no-op if it
-			-- already exists (the error is swallowed by run_child_process).
-			pcall(wezterm.run_child_process, { "cmd.exe", "/c", "mkdir", dir })
-		else
-			pcall(wezterm.run_child_process, { "mkdir", "-p", dir })
+	-- Programs relaunched on restore (claude, opencode). Claude Code records its
+	-- session id per pid in ~/.claude/sessions, so each pane resumes its own.
+	local pane_tree = require("resurrect.pane_tree")
+	pane_tree.resume_command = function(info)
+		if not info then
+			return nil
+		end
+		-- opencode keeps no per-pid session record; --continue picks the most
+		-- recent session of the pane's directory, where the pane is restored.
+		if info.name == "opencode" or (info.executable or ""):match("/opencode$") then
+			return "opencode --continue"
+		end
+		if info.name ~= "claude" then
+			return nil
+		end
+		local file = io.open(wezterm.home_dir .. "/.claude/sessions/" .. info.pid .. ".json", "r")
+		if not file then
+			return nil
+		end
+		local ok, session = pcall(wezterm.json_parse, file:read("*a"))
+		file:close()
+		if ok and session and session.sessionId then
+			return "claude --resume " .. session.sessionId
 		end
 	end
-end
-ensure_state_dirs()
 
--- Where the claude/opencode session records live. On Windows these are inside
--- WSL, reached via the \\wsl.localhost share, but only read on restore (not in
--- the periodic save loop), so the network access is occasional, not hot.
-local SESSION_HOME = wezterm.home_dir
-if is_windows then
-	SESSION_HOME = "\\\\wsl.localhost\\Ubuntu-24.04\\home\\raul"
-end
+	local function restore_pane(pane_tree_state)
+		if pane_tree_state.resume then
+			pane_tree_state.pane:send_text(pane_tree_state.resume .. "\r")
+		else
+			require("resurrect.tab_state").default_on_pane_restore(pane_tree_state)
+		end
+	end
+	resurrect.state_manager.on_pane_restore = restore_pane
 
--- Programs that are relaunched on restore (claude, opencode). Claude Code
--- records its session id per pid in ~/.claude/sessions, so each pane resumes
--- its own conversation.
-local pane_tree = require("resurrect.pane_tree")
-pane_tree.resume_command = function(info)
-	if not info then
-		return nil
-	end
-	-- opencode keeps no per-pid session record; --continue picks the most recent
-	-- session of the pane's directory, which is where the pane is restored.
-	if info.name == "opencode" or (info.executable or ""):match("/opencode$") then
-		return "opencode --continue"
-	end
-	if info.name ~= "claude" then
-		return nil
-	end
-	local file = io.open(SESSION_HOME .. "/.claude/sessions/" .. info.pid .. ".json", "r")
-	if not file then
-		return nil
-	end
-	local ok, session = pcall(wezterm.json_parse, file:read("*a"))
-	file:close()
-	if ok and session and session.sessionId then
-		return "claude --resume " .. session.sessionId
-	end
+	-- Driven by update-status (which only fires while a window exists) instead
+	-- of a timer: timers started during config evaluation do not survive reloads.
+	config.status_update_interval = 5000
+	wezterm.on("update-status", function()
+		local now = os.time()
+		if now - (wezterm.GLOBAL.last_layout_save or 0) < SAVE_INTERVAL_SECONDS then
+			return
+		end
+		wezterm.GLOBAL.last_layout_save = now
+		resurrect.state_manager.save_state(resurrect.workspace_state.get_workspace_state())
+		resurrect.state_manager.write_current_state(wezterm.mux.get_active_workspace(), "workspace")
+	end)
 end
-
-local function restore_pane(pane_tree_state)
-	if pane_tree_state.resume then
-		pane_tree_state.pane:send_text(pane_tree_state.resume .. "\r")
-	else
-		require("resurrect.tab_state").default_on_pane_restore(pane_tree_state)
-	end
-end
-resurrect.state_manager.on_pane_restore = restore_pane
-
--- Driven by update-status (which only fires while a window exists) instead of
--- a timer: timers started during config evaluation do not survive reloads.
-config.status_update_interval = 5000
-wezterm.on("update-status", function()
-	local now = os.time()
-	if now - (wezterm.GLOBAL.last_layout_save or 0) < SAVE_INTERVAL_SECONDS then
-		return
-	end
-	wezterm.GLOBAL.last_layout_save = now
-	resurrect.state_manager.save_state(resurrect.workspace_state.get_workspace_state())
-	resurrect.state_manager.write_current_state(wezterm.mux.get_active_workspace(), "workspace")
-end)
 
 -- Centered at ~89% of the screen width and ~82% of its height, leaving a
 -- comfortable margin on every side. Falls back to the default size on error.
