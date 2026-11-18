@@ -17,28 +17,41 @@ local function make_splits(opts)
 			opts.on_pane_restore(pane_tree)
 		end
 
-		local bottom = pane_tree.bottom
-		if bottom then
-			local split_args = { direction = "Bottom", cwd = bottom.cwd }
-			if opts.relative then
-				split_args.size = bottom.height / (pane_tree.height + bottom.height)
-			elseif opts.absolute then
-				split_args.size = bottom.height
-			end
+		local function split_bottom()
+			local bottom = pane_tree.bottom
+			if bottom then
+				local split_args = { direction = "Bottom", cwd = bottom.cwd }
+				if opts.relative then
+					split_args.size = bottom.height / (pane_tree.height + bottom.height)
+				elseif opts.absolute then
+					split_args.size = bottom.height
+				end
 
-			bottom.pane = pane:split(split_args)
+				bottom.pane = pane:split(split_args)
+			end
 		end
 
-		local right = pane_tree.right
-		if right then
-			local split_args = { direction = "Right", cwd = right.cwd }
-			if opts.relative then
-				split_args.size = right.width / (pane_tree.width + right.width)
-			elseif opts.absolute then
-				split_args.size = right.width
-			end
+		local function split_right()
+			local right = pane_tree.right
+			if right then
+				local split_args = { direction = "Right", cwd = right.cwd }
+				if opts.relative then
+					split_args.size = right.width / (pane_tree.width + right.width)
+				elseif opts.absolute then
+					split_args.size = right.width
+				end
 
-			right.pane = pane:split(split_args)
+				right.pane = pane:split(split_args)
+			end
+		end
+
+		-- Local fix: a tree saved from a vertical cut must split right first.
+		if pane_tree.split_first == "right" then
+			split_right()
+			split_bottom()
+		else
+			split_bottom()
+			split_right()
 		end
 
 		if pane_tree.is_active then

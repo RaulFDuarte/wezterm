@@ -134,6 +134,7 @@ local CHEATSHEET = {
 	{ "   dentro: mover              h j k l · w b e · 0 $ · gg G", act.ActivateCopyMode },
 	{ "   dentro: selecionar         v char · V linha · Ctrl+v bloco", act.ActivateCopyMode },
 	{ "   dentro: copiar / sair      y copia e sai · Esc sai · / busca", act.ActivateCopyMode },
+	{ "Abrir link                    Ctrl+clique", NOP },
 	{ "Quick select (URLs/hashes)    Ctrl+Shift+Space", act.QuickSelect },
 	{ "Buscar no scrollback          Ctrl+Shift+F", act.Search({ CaseInSensitiveString = "" }) },
 	{ "Rolar página p/ cima          Shift+PgUp", act.ScrollByPage(-1) },
@@ -153,6 +154,24 @@ local CHEATSHEET = {
 	{ "Debug overlay (Lua)           Ctrl+Shift+L", act.ShowDebugOverlay },
 	{ "Esta lista                    F1", NOP },
 }
+
+-- Ctrl+click opens links, including inside TUIs that capture the mouse (Claude
+-- Code). The Down event is swallowed so the app never sees half of a click.
+config.mouse_bindings = {}
+for _, mouse_reporting in ipairs({ false, true }) do
+	table.insert(config.mouse_bindings, {
+		event = { Up = { streak = 1, button = "Left" } },
+		mods = "CTRL",
+		mouse_reporting = mouse_reporting,
+		action = act.OpenLinkAtMouseCursor,
+	})
+	table.insert(config.mouse_bindings, {
+		event = { Down = { streak = 1, button = "Left" } },
+		mods = "CTRL",
+		mouse_reporting = mouse_reporting,
+		action = NOP,
+	})
+end
 
 local cheatsheet_choices = {}
 for i, entry in ipairs(CHEATSHEET) do
@@ -303,8 +322,11 @@ local function center_window(gui_window, scale)
 end
 
 -- Restore the saved layout; on first run (or unreadable state) open a fresh window.
+-- The GNOME launcher runs `wezterm start --cwd .`, so cmd is set without args:
+-- only an explicit program (`wezterm start -- prog`) skips the restore, otherwise
+-- the autosave would overwrite the saved layout with the fresh window.
 wezterm.on("gui-startup", function(cmd)
-	local restored = not cmd and resurrect.state_manager.resurrect_on_gui_startup()
+	local restored = not (cmd and cmd.args) and resurrect.state_manager.resurrect_on_gui_startup()
 	if restored and #wezterm.mux.all_windows() > 0 then
 		for _, mux_window in ipairs(wezterm.mux.all_windows()) do
 			center_window(mux_window:gui_window(), false)

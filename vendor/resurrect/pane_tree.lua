@@ -23,26 +23,6 @@ local function compare_pane_by_coord(a, b)
 	end
 end
 
----@param root PaneInformation
----@param pane PaneInformation
----@return boolean
-local function is_right(root, pane)
-	if root.left + root.width < pane.left then
-		return true
-	end
-	return false
-end
-
----@param root PaneInformation
----@param pane PaneInformation
----@return boolean
-local function is_bottom(root, pane)
-	if root.top + root.height < pane.top then
-		return true
-	end
-	return false
-end
-
 ---@param root pane_tree
 ---@param panes PaneInformation
 ---@return pane_tree | nil
@@ -123,15 +103,32 @@ local function insert_panes(root, panes)
 		return root
 	end
 
-	local right, bottom = {}, {}
+	-- Local fix: upstream sorted panes into "right" and "bottom" lists independently, so a
+	-- pane both right of and below root (e.g. A | (B / C) next to a bottom row)
+	-- landed in both lists and was visited twice, crashing on root.pane == nil.
+	-- Split along whichever straight cut crosses no pane instead; the tree from
+	-- a WezTerm split layout always has at least one.
+	local cut_x = root.left + root.width + 1
+	local cut_y = root.top + root.height + 1
+	local horizontal_ok, vertical_ok = true, true
 	for _, pane in ipairs(panes) do
-		if is_right(root, pane) then
-			table.insert(right, pane)
+		if pane.top < cut_y and pane.top + pane.height >= cut_y then
+			horizontal_ok = false
 		end
-		if is_bottom(root, pane) then
-			table.insert(bottom, pane)
+		if pane.left < cut_x and pane.left + pane.width >= cut_x then
+			vertical_ok = false
 		end
 	end
+
+	local right, bottom = {}, {}
+	for _, pane in ipairs(panes) do
+		if horizontal_ok then
+			table.insert(pane.top >= cut_y and bottom or right, pane)
+		else
+			table.insert(pane.left >= cut_x and right or bottom, pane)
+		end
+	end
+	root.split_first = (horizontal_ok or not vertical_ok) and "bottom" or "right"
 
 	if #right > 0 then
 		local right_child = pop_connected_right(root, right)
